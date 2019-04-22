@@ -28,6 +28,49 @@ def load_model(model_name):
     model = joblib.load(model_name)
     return model
 
+#直接从数据库里获取特征
+def get_data_feature(mogo_url, database, collection_name):
+    """
+    :param mogo_url: Mongodb的url地址
+    :param database: 数据库名
+    :param collection_name: 名
+    :return: 流量特征
+    """
+    mongo_url = mogo_url  # '172.18.130.22:26000'
+    client = pymongo.MongoClient(mongo_url)
+
+    DATABASE = database  # 'ion'
+    db = client[DATABASE]
+    COLLECTION = collection_name  # 'sessionFeatureTest0'
+    collection = db[COLLECTION]
+    flows = collection.find({}, {'isIdentify': 0})
+    cnt = flows.count()
+    data_feature = []
+    for flow in flows:
+        # data_feature.append(flow)
+        feature = flow['features'].split(',')
+        feature_int = [float(x) for x in feature]
+        feature_final = feature_int + [flow['key'], flow['ip']]
+        data_feature.append(feature_final)
+    column = ['proto', 'pktInterval_max', 'pktInterval_min', 'pktInterval_sum', 'pktInterval_med',
+              'pktInterval_var', 'pktInterval_std', 'pktInterval_avg', 'pktInterval_upPrecent',
+              'pktInterval_downPrecent', 'pktInterval_entropy',
+              'pktSize_max', 'pktSize_min', 'pktSize_sum', 'pktSize_med', 'pktSize_var', 'pktSize_std',
+              'pktSize_avg', 'pktSize_upPrecent', 'pktSize_downPrecent', 'pktSize_entropy',
+              'rxPktInterval_max', 'rxPktInterval_min', 'rxPktInterval_sum', 'rxPktInterval_med',
+              'rxPktInterval_var', 'rxPktInterval_std', 'rxPktInterval_avg', 'rxPktInterval_upPrecent',
+              'rxPktInterval_downPrecent', 'rxPktInterval_entropy',
+              'rxPktSize_max', 'rxPktSize_min', 'rxPktSize_sum', 'rxPktSize_med', 'rxPktSize_var', 'rxPktSize_std',
+              'rxPktSize_avg', 'rxPktSize_upPrecent', 'rxPktSize_downPrecent', 'rxPktSize_entropy',
+              'txPktInterval_max', 'txPktInterval_min', 'txPktInterval_sum', 'txPktInterval_med',
+              'txPktInterval_var', 'txPktInterval_std', 'txPktInterval_avg', 'txPktInterval_upPrecent',
+              'txPktInterval_downPrecent', 'txPktInterval_entropy',
+              'txPktSize_max', 'txPktSize_min', 'txPktSize_sum', 'txPktSize_med', 'txPktSize_var', 'txPktSize_std',
+              'txPktSize_avg', 'txPktSize_upPrecent', 'txPktSize_downPrecent', 'txPktSize_entropy', 'sizeRatio',
+              'packets', 'packetsA', 'packetsB', 'packetsRatio', 'key', 'ip']
+    data_feature_frame = pd.DataFrame(data_feature, columns=column)
+    return data_feature_frame
+
 
 # 从数据库里读取流的报文特征
 def get_data(mogo_url, database, collection_name):
@@ -109,8 +152,8 @@ def RemoveNum(a, data):
 # 提取某个字段的数学统计特征
 def IoTFeatureExtraction(date):
     '''
-    :param date:
-    :return:
+    :param date:一个列表序列
+    :return: 该列表的最大值、最小值，和、中位数、方差、标准差、平均值、上四分位、下四分位和信息熵
     '''
     if date:
         maximum = max(date)
@@ -143,6 +186,11 @@ def IoTFeatureExtraction(date):
 
 # 获取流量特征
 def data_process(data, iot_dict):
+    """
+    :param data: 包含流、协议、包的大小、包的时长的列表
+    :param iot_dict: ip所属类别
+    :return:提取后的流的特征向量
+    """
     print('开始处理数据')
     flow = data[0]
     protocolAll = data[1]
@@ -289,13 +337,12 @@ def learn_data_is_enough(learn_data, iot_dict, num_per_class):
     return flag
 
 
-def merger_data(original_data, learn_data, iot_dict, sample_num):
+def merger_data(original_data, learn_data, sample_num):
     '''
-
     :param original_data: 原始的学习集
-    :param learn_data:  学习集
-    :param iot_dict:    ip映射到类别的字典
-    :param sample_num:  每类采集的流数
+    :param learn_data: 学习集
+    :param iot_dict: ip映射到类别的字典
+    :param sample_num: 每类采集的流数
     :return: 用于监督模型的训练集
     '''
     data = pd.concat([original_data, learn_data], axis=0)
@@ -357,6 +404,9 @@ def pred_topred_data(model, pred_data, threshold=0.8):
 
 
 def main():
+    """
+    :return: 主函数，返回预测的每个IP的类别
+    """
     start = time.time()
     # 1.加载ip信息表
     iot_dict = ip_class_info('ip_class.pkl')
@@ -394,7 +444,7 @@ def main():
     if not flag:
         print('数据集不够，请补充数据集')
         # exit()
-    train_data = merger_data(origin_flow_feature, learn_data, iot_dict, 200)
+    train_data = merger_data(origin_flow_feature, learn_data, 200)
 
     # 8.训练新的静态模型
     rf = train_model(train_data, precision=0.9)
@@ -408,9 +458,6 @@ def main():
 
 if __name__ == "__main__":
     result = main()
-    print('hahah_0419')
-    print('看你怎么办')
-    print('我就这样')
 
 
 
