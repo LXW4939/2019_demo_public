@@ -4,6 +4,7 @@ Created on Thu Apr 18 14:09:41 2019
 
 @author: LXW
 """
+import re
 import time
 import operator
 import numpy as np
@@ -11,6 +12,8 @@ import pandas as pd
 import pickle
 import pymongo
 import matplotlib.pyplot as plt
+from xgboost import XGBClassifier
+from tpot import TPOTClassifier
 from sklearn.externals import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
@@ -27,6 +30,7 @@ def load_model(model_name):
     '''
     model = joblib.load(model_name)
     return model
+
 
 #直接从数据库里获取特征
 def get_data_feature(mogo_url, database, collection_name):
@@ -99,12 +103,13 @@ def get_data(mogo_url, database, collection_name):
         sum = sum + 1
         print(sum)
         if sum < len(flow) + 1:
-            flowOne = collection.find({'key': x}).limit(5000)  # .sort('timeStamp')
-            '''
-            endTime = flowOne[0]['timeStamp'] + 30000
-            data.append(collection.find({'timeStamp': {"$lte": endTime}, 'key': x}).sort('timeStamp'))
-            '''
-            data.append(flowOne)
+            flowOne = collection.find({'key': x}).sort('timeStamp')
+
+            endTime = flowOne[0]['timeStamp'] + 7200
+            lst=collection.find({'timeStamp': {"$lte": endTime}, 'key': x}).sort('timeStamp')[:10000]
+            #data.append(collection.find({'timeStamp': {"$lte": endTime}, 'key': x}).sort('timeStamp'))
+
+            data.append(lst)
         else:
             break
     print('获取流信息')
@@ -205,12 +210,12 @@ def data_process(data, iot_dict):
     for i in range(length):
         print('正在处理第{}条，一共{}条'.format(i, length))
         quintuple = flow[i]
-
+        ip_10_0 = "10\.0\.((?:(?:25[0-5]|2[0-4]\\d|((1\\d{2})|([1-9]?\\d)))\\.){1}(?:25[0-5]|2[0-4]\\d|((1\\d{2})|([1-9]?\\d))))"
         flow_split = flow[i].split(',')
         ip1 = flow_split[0]
         ip2 = flow_split[2]
         ip = ip1
-        if ip1 not in iot_dict and ip2 in iot_dict:
+        if ip1 not in iot_dict and (ip2 in iot_dict or (re.match(ip_10_0, ip2) is not None)):
             ip = ip2
         # 协议
         protocolE = protocolAll[i]
@@ -286,6 +291,7 @@ def pred_test_data(model, data_frame, iot_dict, threshold):
     :param iot_dict: 每个ip所属的类别
     :return:
     '''
+    """
     to_pred_data = pd.DataFrame(columns=data_frame.columns)
     learn_data = pd.DataFrame(columns=data_frame.columns)
     error_data = pd.DataFrame(columns=data_frame.columns)
@@ -297,7 +303,7 @@ def pred_test_data(model, data_frame, iot_dict, threshold):
     smaller_threshold_idx = pred_prob.max(axis=1) < threshold
     smaller_threshold_idx = np.where(smaller_threshold_idx == True)[0]
     smaller_threshold_num = len(smaller_threshold_idx)
-    for idx, data_frame_idx in enumerate(pred_class.index.tolist()):
+    for idx, data_frame_idx in enumerate(pred_class.index.tolist()): #运行时间长，需改进
         print('处理大于阈值的数据集，目前处理到第{}条，一共{}条'.format(idx, greater_threshold_num))
         tmp_ip = data_frame.iloc[data_frame_idx, -1]
         if tmp_ip in iot_dict:
@@ -315,6 +321,35 @@ def pred_test_data(model, data_frame, iot_dict, threshold):
             learn_data = learn_data.append(data_frame.iloc[data_frame_idx, :])
         else:
             to_pred_data = to_pred_data.append(data_frame.iloc[data_frame_idx, :])
+    return learn_data, to_pred_data, error_data
+    """
+    model.classes_ = model.classes_ - 1
+    data_test = data_frame.iloc[:, :-2]
+    pred_prob = pd.DataFrame(model.predict_proba(data_test), columns=model.classes_)
+    greater_threshold_idx = pred_prob.max(axis=1) >= threshold
+    pred_class = pred_prob[greater_threshold_idx].idxmax(axis=1)
+    smaller_threshold_idx = pred_prob.max(axis=1) < threshold
+    smaller_threshold_data = data_frame[smaller_threshold_idx]
+
+    greater_threshold_data = data_frame[greater_threshold_idx]
+    greater_threshold_data['label'] = greater_threshold_data['ip'].map(lambda x: iot_dict.get(x, -1))
+    greater_threshold_data['pred'] = pred_class
+    greater_threshold_data_iniot_dict = greater_threshold_data[greater_threshold_data['label'] != -1]
+    learn_data = greater_threshold_data_iniot_dict[
+    greater_threshold_data_iniot_dict['label'] == greater_threshold_data_iniot_dict['pred']]
+    error_data = greater_threshold_data_iniot_dict[
+    greater_threshold_data_iniot_dict['label'] != greater_threshold_data_iniot_dict['pred']]
+    to_pred_data = greater_threshold_data[greater_threshold_data['label'] == -1]
+    learn_data.drop(columns=['pred', 'label'], axis=1, inplace=True)
+    error_data.drop(columns=['pred', 'label'], axis=1, inplace=True)
+    to_pred_data.drop(columns=['pred', 'label'], axis=1, inplace=True)
+    smaller_threshold_data['label'] = smaller_threshold_data['ip'].map(lambda x: iot_dict.get(x, -1))
+    smaller_threshold_learn_data = smaller_threshold_data[smaller_threshold_data['label'] != -1]
+    smaller_threshold_to_pred_data = smaller_threshold_data[smaller_threshold_data['label'] == -1]
+    smaller_threshold_learn_data.drop(columns=['label'], axis=1, inplace=True)
+    smaller_threshold_to_pred_data.drop(columns=['label'], axis=1, inplace=True)
+    learn_data = pd.concat([learn_data, smaller_threshold_learn_data])
+    to_pred_data = pd.concat([to_pred_data, smaller_threshold_to_pred_data])
     return learn_data, to_pred_data, error_data
 
 
@@ -368,16 +403,21 @@ def train_model(train_data, precision=0.9):
     label = train_data.iloc[:, -1].astype(np.int)
     X_train, X_test, y_train, y_test = train_test_split(feature, label, test_size=0.3, random_state=6)
     rf0 = RandomForestClassifier(n_estimators=1000, random_state=17)
+    bst = XGBClassifier()
+    tpot = TPOTClassifier(generations=3, population_size=20, verbosity=2)
+    tpot.fit(X_train, y_train)
+    bst.fit(X_train, y_train)
     rf0.fit(X_train, y_train)
-    result = rf0.predict(X_test)
-    acc = accuracy_score(y_test, result)
+    result_rf = rf0.predict(X_test)
+    result_bst = bst.predict(X_test)
+    acc = accuracy_score(y_test, result_bst)
     if acc < precision:
         print('训练过程准确率小于{}, 建议检查数据质量'.format(precision))
-    print('acc={}'.format(accuracy_score(y_test, result)))
-    print('Classification report for classifier:\n{}'.format(classification_report(y_test, result)))
-    print("Confusion matrix:\n{}".format(confusion_matrix(y_test, result,
+    print('acc={}'.format(accuracy_score(y_test, result_rf)))
+    print('Classification report for classifier:\n{}'.format(classification_report(y_test, result_rf)))
+    print("Confusion matrix:\n{}".format(confusion_matrix(y_test, result_rf,
                                                           labels=rf0.classes_)))
-    return rf0
+    return rf0, bst, tpot
 
 
 def pred_topred_data(model, pred_data, threshold=0.8):
@@ -386,7 +426,7 @@ def pred_topred_data(model, pred_data, threshold=0.8):
     :param pred_data: 预测的数据
     :return:每个iP的预测类别
     '''
-    pred_prob = pd.DataFrame(model.predict_proba(pred_data.iloc[:, :-2]), columns=model.classes_)
+    pred_prob = pd.DataFrame(model.predict_proba(pred_data.iloc[:, :-2].astype('float'))) #,  columns=model.classes)
     pred_label = pred_prob.idxmax(axis=1)
     class_num = pred_prob.shape[1]
     ip_num = len(pred_data['ip'].unique())
@@ -403,18 +443,20 @@ def pred_topred_data(model, pred_data, threshold=0.8):
     return pred_ip_info['pred']
 
 
-def main():
-    """
-    :return: 主函数，返回预测的每个IP的类别
-    """
+if __name__ == "__main__":
+
     start = time.time()
     # 1.加载ip信息表
-    iot_dict = ip_class_info('ip_class.pkl')
+    iot_dict = ip_class_info('ip_dict.pkl')
 
     # 2.加载原始数据集,判断原始数据集每个ip是否都有标签
+
     origin_packet_data = get_data('172.18.130.22:26000', 'ion', 'packetTest0')
     origin_flow_feature = data_process(origin_packet_data, iot_dict)
-    # origin_flow_feature = pd.read_csv('origin_flow_feature.csv')
+
+    # origin_flow_feature = pd.read_csv('origin_flow_feature.csv') #本地文件直接读
+    # 从数据库里直接读取特征
+    # origin_flow_feature = get_data_feature('172.18.130.22:26000', 'ion', 'sessionFeatureTest0')
     origin_flow_feature['label'] = origin_flow_feature['ip'].map(lambda x: iot_dict.get(x, -1))
 
     indice_nolabel = np.where(origin_flow_feature['label'] == -1)[0]
@@ -428,40 +470,42 @@ def main():
     origin_model = load_model('iot_v1.joblib')
 
     # 4.加载测试数据
+
     test_data_packet = get_data('172.18.130.22:26000', 'ion', 'packetTest4')
-    test_data_flow = data_process(test_data_packet)
+    test_data_flow = data_process(test_data_packet, iot_dict)
+    # 从本地文件读取数据
     # test_data_flow = pd.read_csv('test_data_flow.csv')
 
+    # 从数据库里直接读取特征
+    # test_data_flow = get_data_feature('172.18.130.22:26000', 'ion', 'sessionFeatureTest4')
     # 5.原始静态模型对测试集进行预测，得到学习集，待测数据和预测错的数据集
-    learn_data, to_pred_data, error_data = pred_test_data(origin_model, test_data_flow, iot_dict, 0.7)
+    learn_data, to_pred_data, error_data = pred_test_data(origin_model, test_data_flow, iot_dict, 0.8)
     # learn_data = pd.read_csv('learn_data.csv')
     # to_pred_data  =pd.read_csv('to_pred_data.csv')
-
+    to_pred_data = pd.concat([to_pred_data, error_data])
     # 6.判断学习集是否足够
-    flag = learn_data_is_enough(learn_data, iot_dict, 200)
+    flag = learn_data_is_enough(learn_data, iot_dict, 500)
 
     # 7.合并学习集与原始学习集，随机采样获得训练集
     if not flag:
         print('数据集不够，请补充数据集')
         # exit()
-    train_data = merger_data(origin_flow_feature, learn_data, 200)
+    train_data = merger_data(origin_flow_feature, learn_data, 2000) #1000
 
     # 8.训练新的静态模型
-    rf = train_model(train_data, precision=0.9)
+    rf, bst, tpot = train_model(train_data, precision=0.9)
 
     # 9.对数据集进行预测，输出每个ip的类别
-    result = pred_topred_data(rf, to_pred_data, 0.5)
+    result_rf = pred_topred_data(rf, to_pred_data, 0.8) #0.7
+    result_bst = pred_topred_data(bst, to_pred_data, 0.8)
+    result_tpot = pred_topred_data(tpot, to_pred_data, 0.8)
+
+    test = get_data('172.18.130.22:26000', 'ion', 'packetTest1')
+    test_data = data_process(test, iot_dict)
+    res = pred_topred_data(rf, test_data, 0.8)
     end = time.time()
     print('运行完毕，使用时间{}秒！'.format(end - start))
-    return result
 
-
-if __name__ == "__main__":
-    result = main()
-    print('hahah_0419')
-    print('看你怎么办')
-    print('我就这样')
-    print('在github页面上进行修改')
 
 
 
