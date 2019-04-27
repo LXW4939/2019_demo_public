@@ -214,9 +214,21 @@ def data_process(data, iot_dict):
         flow_split = flow[i].split(',')
         ip1 = flow_split[0]
         ip2 = flow_split[2]
+        """
         ip = ip1
         if ip1 not in iot_dict and (ip2 in iot_dict or (re.match(ip_10_0, ip2) is not None)):
             ip = ip2
+        """
+        if ip1 in iot_dict:
+            ip = ip1
+        elif ip2 in iot_dict:
+            ip = ip2
+        elif re.match(ip_10_0, ip1) is not None:
+            ip = ip1
+        elif re.match(ip_10_0, ip2) is not None:
+            ip = ip2
+        else:
+            ip = ip1
         # 协议
         protocolE = protocolAll[i]
         # 全部包时间特征
@@ -292,37 +304,6 @@ def pred_test_data(model, data_frame, iot_dict, threshold):
     :return:
     '''
     """
-    to_pred_data = pd.DataFrame(columns=data_frame.columns)
-    learn_data = pd.DataFrame(columns=data_frame.columns)
-    error_data = pd.DataFrame(columns=data_frame.columns)
-    data_test = data_frame.iloc[:, :-2]
-    pred_prob = pd.DataFrame(model.predict_proba(data_test), columns=model.classes_)
-    greater_threshold_idx = pred_prob.max(axis=1) >= threshold
-    pred_class = pred_prob[greater_threshold_idx].idxmax(axis=1)
-    greater_threshold_num = len(pred_class)
-    smaller_threshold_idx = pred_prob.max(axis=1) < threshold
-    smaller_threshold_idx = np.where(smaller_threshold_idx == True)[0]
-    smaller_threshold_num = len(smaller_threshold_idx)
-    for idx, data_frame_idx in enumerate(pred_class.index.tolist()): #运行时间长，需改进
-        print('处理大于阈值的数据集，目前处理到第{}条，一共{}条'.format(idx, greater_threshold_num))
-        tmp_ip = data_frame.iloc[data_frame_idx, -1]
-        if tmp_ip in iot_dict:
-            if pred_class.iloc[idx] == iot_dict[tmp_ip]:
-                learn_data = learn_data.append(data_frame.iloc[data_frame_idx, :])
-            else:
-                error_data = error_data.append(data_frame.iloc[data_frame_idx, :])
-        else:
-            to_pred_data = to_pred_data.append(data_frame.iloc[data_frame_idx, :])
-
-    for idx, data_frame_idx in enumerate(smaller_threshold_idx):
-        print('处理小于阈值的数据集，目前处理到第{}条，一共{}条'.format(idx, smaller_threshold_num))
-        tmp_ip = data_frame.iloc[data_frame_idx, -1]
-        if tmp_ip in iot_dict:
-            learn_data = learn_data.append(data_frame.iloc[data_frame_idx, :])
-        else:
-            to_pred_data = to_pred_data.append(data_frame.iloc[data_frame_idx, :])
-    return learn_data, to_pred_data, error_data
-    """
     model.classes_ = model.classes_ - 1
     data_test = data_frame.iloc[:, :-2]
     pred_prob = pd.DataFrame(model.predict_proba(data_test), columns=model.classes_)
@@ -350,6 +331,44 @@ def pred_test_data(model, data_frame, iot_dict, threshold):
     smaller_threshold_to_pred_data.drop(columns=['label'], axis=1, inplace=True)
     learn_data = pd.concat([learn_data, smaller_threshold_learn_data])
     to_pred_data = pd.concat([to_pred_data, smaller_threshold_to_pred_data])
+    return learn_data, to_pred_data, error_data
+    """
+    isin_iot_dict = data_frame['ip'].map(lambda x: iot_dict.get(x, -1))
+    index = isin_iot_dict == -1
+    to_pred_data = data_frame[isin_iot_dict == -1]
+    isin_iot_dict_data = data_frame[isin_iot_dict != -1]
+    isin_iot_dict_data.reset_index(drop=True, inplace=True)
+    model.classes_ = model.classes_ - 1
+    data_test = isin_iot_dict_data.iloc[:, :-2]
+    pred_prob = pd.DataFrame(model.predict_proba(data_test), columns=model.classes_)
+    greater_threshold_idx = pred_prob.max(axis=1) >= threshold
+    pred_class = pred_prob[greater_threshold_idx].idxmax(axis=1)
+    # greater_threshold_num = len(pred_class)
+    smaller_threshold_idx = pred_prob.max(axis=1) < threshold
+    # smaller_threshold_idx = np.where(smaller_threshold_idx ==True)[0]
+    smaller_threshold_num = len(smaller_threshold_idx)
+    smaller_threshold_data = isin_iot_dict_data[smaller_threshold_idx]
+    model_class_lst = list(model.classes_)
+    smaller_threshold_data_label = smaller_threshold_data['ip'].map(lambda x: iot_dict.get(x, -1))
+    smaller_threshold_data_label_isin_model = smaller_threshold_data_label.map(lambda x: x in model_class_lst)
+    num = sum(smaller_threshold_data_label_isin_model)
+    if num > 0:
+        smaller_threshold_data_label_isin_model_data = smaller_threshold_data[smaller_threshold_data_label_isin_model]
+
+    greater_threshold_data = isin_iot_dict_data[greater_threshold_idx]
+    greater_threshold_data['label'] = greater_threshold_data['ip'].map(lambda x: iot_dict.get(x, -1))
+    greater_threshold_data['pred'] = pred_class
+    greater_threshold_data_iniot_dict = greater_threshold_data[greater_threshold_data['label'] != -1]
+    if len(greater_threshold_data_iniot_dict) != len(greater_threshold_data):
+        raise Exception('异常')
+    learn_data = greater_threshold_data_iniot_dict[
+    greater_threshold_data_iniot_dict['label'] == greater_threshold_data_iniot_dict['pred']]
+    error_data = greater_threshold_data_iniot_dict[
+    greater_threshold_data_iniot_dict['label'] != greater_threshold_data_iniot_dict['pred']]
+    learn_data.drop(columns=['pred', 'label'], axis=1, inplace=True)
+    error_data.drop(columns=['pred', 'label'], axis=1, inplace=True)
+
+    learn_data = pd.concat([learn_data, smaller_threshold_data])
     return learn_data, to_pred_data, error_data
 
 
@@ -447,7 +466,7 @@ if __name__ == "__main__":
 
     start = time.time()
     # 1.加载ip信息表
-    iot_dict = ip_class_info('ip_dict.pkl')
+    iot_dict = ip_class_info('ip_class.pkl')
 
     # 2.加载原始数据集,判断原始数据集每个ip是否都有标签
 
@@ -496,13 +515,13 @@ if __name__ == "__main__":
     rf, bst, tpot = train_model(train_data, precision=0.9)
 
     # 9.对数据集进行预测，输出每个ip的类别
-    result_rf = pred_topred_data(rf, to_pred_data, 0.8) #0.7
-    result_bst = pred_topred_data(bst, to_pred_data, 0.8)
-    result_tpot = pred_topred_data(tpot, to_pred_data, 0.8)
+    result_rf = pred_topred_data(rf, to_pred_data, 0.7) #0.7
+    result_bst = pred_topred_data(bst, to_pred_data, 0.7)
+    result_tpot = pred_topred_data(tpot, to_pred_data, 0.7)
 
     test = get_data('172.18.130.22:26000', 'ion', 'packetTest1')
     test_data = data_process(test, iot_dict)
-    res = pred_topred_data(rf, test_data, 0.8)
+    res = pred_topred_data(rf, test_data, 0.7)
     end = time.time()
     print('运行完毕，使用时间{}秒！'.format(end - start))
 
