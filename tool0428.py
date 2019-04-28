@@ -5,6 +5,7 @@ Created on Thu Apr 18 14:09:41 2019
 @author: LXW
 """
 import time
+import random
 import re
 import operator
 import numpy as np
@@ -95,10 +96,12 @@ def get_data(mogo_url, database, collection_name):
         sum = sum + 1
         print(sum)
         if sum < len(flow) + 1:
-            flowOne = collection.find({'key': x}).sort('timeStamp')
-            endTime = flowOne[0]['timeStamp'] + 7200
-            lst = collection.find({'timeStamp': {"$lte": endTime}, 'key': x}).sort('timeStamp')[:10000]
-            data.append(lst)
+            flowOne = collection.find({'key': x}).limit(10000)  # .sort('timeStamp')
+            '''
+            endTime = flowOne[0]['timeStamp'] + 30000
+            data.append(collection.find({'timeStamp': {"$lte": endTime}, 'key': x}).sort('timeStamp'))
+            '''
+            data.append(flowOne)
         else:
             break
     print('获取流信息')
@@ -285,7 +288,29 @@ def ip_class_info(ip_info_name):
     ip_calss_index.sort()
     assert operator.eq(ip_class_name_index, ip_calss_index), '类别不连续'
     iot_dict['ip_class'] = ip_class_name
-    return iot_dict
+
+    iot_reverse_dict = {}
+    for key, value in iot_dict.items():
+        if key is 'ip_class':
+            continue
+        if value not in iot_reverse_dict:
+            iot_reverse_dict[value] = [key]
+        else:
+            iot_reverse_dict[value].append(key)
+    return iot_dict, iot_reverse_dict
+
+
+def random_sample_ip(iot_dict, iot_reverse_dict, sample_num):
+    iot_new_dict = {}
+    for key, values in iot_reverse_dict.items():
+        if len(values) > sample_num:
+            lst = random.sample(values, sample_num)
+        else:
+            lst = values
+        for tmp_ip in lst:
+            iot_new_dict[tmp_ip] = key
+    iot_new_dict['ip_class'] = iot_dict['ip_class']
+    return iot_new_dict
 
 
 def pred_test_data(model, data_frame, iot_dict, threshold):
@@ -383,6 +408,7 @@ def merger_data(original_data, learn_data, iot_dict, sample_num):
     :return: 用于监督模型的训练集
     '''
     data = pd.concat([original_data, learn_data], axis=0)
+    data.reset_index(drop=True, inplace=True)
     # data['label'] = data['ip'].map(lambda x: iot_dict.get(x, -1))
     label_list = list(data['label'].unique())
     train_data = pd.DataFrame(columns=original_data.columns)
@@ -393,26 +419,29 @@ def merger_data(original_data, learn_data, iot_dict, sample_num):
         if len(tmp_data) >= sample_num and (class_idx != -1):  # -1表示类别不确定
             tmp_data = tmp_data.sample(sample_num)
         train_data = pd.concat([train_data, tmp_data], axis=0)
-    return train_data
+    test_data = data[~ data.index.isin(train_data.index)]
+    return train_data, test_data
 
 
-def train_model(train_data, precision=0.9):
+def train_model(train_data, test_data, precision=0.9):
     '''
     :param train_data: 训练数据集
     :return: 训练后的静态模型
     '''
     feature = train_data.iloc[:, :-3].astype(np.float)
     label = train_data.iloc[:, -1].astype(np.int)
-    X_train, X_test, y_train, y_test = train_test_split(feature, label, test_size=0.3, random_state=6)
+    test_feature = test_data.iloc[:, :-3].astype(np.float)
+    test_label = test_data.iloc[:, -1].astype(np.int)
+    # X_train, X_test, y_train, y_test = train_test_split(feature, label, test_size=0.3, random_state=6)
     rf0 = RandomForestClassifier(n_estimators=1000, random_state=17)
-    rf0.fit(X_train, y_train)
-    result = rf0.predict(X_test)
-    acc = accuracy_score(y_test, result)
+    rf0.fit(feature, label)
+    result = rf0.predict(test_feature)
+    acc = accuracy_score(test_label, result)
     if acc < precision:
         print('训练过程准确率小于{}, 建议检查数据质量'.format(precision))
-    print('acc={}'.format(accuracy_score(y_test, result)))
-    print('Classification report for classifier:\n{}'.format(classification_report(y_test, result)))
-    print("Confusion matrix:\n{}".format(confusion_matrix(y_test, result,
+    print('acc={}'.format(accuracy_score(test_label, result)))
+    print('Classification report for classifier:\n{}'.format(classification_report(test_label, result)))
+    print("Confusion matrix:\n{}".format(confusion_matrix(test_label, result,
                                                           labels=rf0.classes_)))
     return rf0
 
@@ -443,55 +472,57 @@ def pred_topred_data(model, pred_data, threshold=0.8):
 
 if __name__ == "__main__":
 
-    start = time.time()
-    # 1.加载ip信息表
-    iot_dict = ip_class_info('ip_info0428.pkl')
+    start=time.time()
+    #1.加载ip信息表
+    iot_dict, iot_reverse_dict = ip_class_info('ip_class.pkl')
+    iot_dict = random_sample_ip(iot_dict, iot_reverse_dict, 5)
 
-    # 2.加载原始数据集,判断原始数据集每个ip是否都有标签
+    #2.加载原始数据集,判断原始数据集每个ip是否都有标签
     origin_packet_data = get_data('172.18.130.22:26000', 'ion', 'packetTest0')
-    origin_flow_feature = data_process(origin_packet_data, iot_dict)
-    # origin_flow_feature = pd.read_csv('origin_flow_feature.csv')
+    origin_flow_feature= data_process(origin_packet_data, iot_dict)
+    #origin_flow_feature = pd.read_csv('origin_flow_feature.csv')
     origin_flow_feature['label'] = origin_flow_feature['ip'].map(lambda x: iot_dict.get(x, -1))
 
     indice_nolabel = np.where(origin_flow_feature['label'] == -1)[0]
     if len(indice_nolabel) > 0:
         print('原始数据集部分没有标签，索引为{}'.format(list(indice_nolabel)))
-        # exit()
+        #exit()
         origin_flow_feature = origin_flow_feature[origin_flow_feature['label'] != -1]
         origin_flow_feature.reset_index(drop=True, inplace=True)
 
-    # 3.加载原始的静态模型
+    #3.加载原始的静态模型
     origin_model = load_model('iot_v1.joblib')
 
-    # 4.加载测试数据
+    #4.加载测试数据
     test_data_packet = get_data('172.18.130.22:26000', 'ion', 'packetTest4')
     test_data_flow = data_process(test_data_packet, iot_dict)
-    # test_data_flow = pd.read_csv('test_data_flow.csv')
+    #test_data_flow = pd.read_csv('test_data_flow.csv')
 
-    # 5.原始静态模型对测试集进行预测，得到学习集，待测数据和预测错的数据集
-    learn_data, to_pred_data, error_data = pred_test_data(origin_model, test_data_flow, iot_dict, 0.7)
-    # learn_data = pd.read_csv('learn_data.csv')
-    # to_pred_data  =pd.read_csv('to_pred_data.csv')
+    #5.原始静态模型对测试集进行预测，得到学习集，待测数据和预测错的数据集
+    learn_data, to_pred_data ,error_data = pred_test_data(origin_model, test_data_flow, iot_dict, 0.7)
+    #learn_data = pd.read_csv('learn_data.csv')
+    #to_pred_data  =pd.read_csv('to_pred_data.csv')
 
-    # 6.判断学习集是否足够
+    #6.判断学习集是否足够
     flag = learn_data_is_enough(learn_data, iot_dict, 200)
 
-    # 7.合并学习集与原始学习集，随机采样获得训练集
+    #7.合并学习集与原始学习集，随机采样获得训练集
     if not flag:
         print('数据集不够，请补充数据集')
-        # exit()
-    train_data = merger_data(origin_flow_feature, learn_data, iot_dict, 2000)
+        #exit()
+    
+    train_data, test_data = merger_data(origin_flow_feature, learn_data, iot_dict, 2000)
 
     # 8.训练新的静态模型
-    rf = train_model(train_data, precision=0.9)
+    rf = train_model(train_data, test_data, precision=0.9)
 
     # 9.对数据集进行预测，输出每个ip的类别
     # to_pred_data = pd.concat([to_pred_data, error_data])
-    result = pred_topred_data(rf, to_pred_data, 0.5)
+    result = pred_topred_data(rf, to_pred_data, 0.7)
 
-    test = get_data('172.18.130.22:26000', 'ion', 'packetTest1')
+    test = get_data('172.18.130.22:26000', 'ion', 'packetTest3')
     test_data = data_process(test, iot_dict)
-    res = pred_topred_data(rf, test_data, 0.5)
+    res = pred_topred_data(rf, test_data, 0.7)
     end = time.time()
     print('运行完毕，使用时间{}秒！'.format(end - start))
 
