@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-@author: czc
-@file: test.py
-@time: 2019/6/25 11:52
-"""
+
 import os
 import time, json
 import numpy as np
